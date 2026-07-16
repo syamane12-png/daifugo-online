@@ -1,0 +1,13 @@
+{
+  "name": "daifugo-online",
+  "version": "1.0.0",
+  "private": true,
+  "description": "大富豪オンライン対戦サーバー(依存パッケージなし・Node.js標準ライブラリのみ)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
