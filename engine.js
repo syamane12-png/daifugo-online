@@ -8,7 +8,6 @@
 const SUITS = ['♠', '♥', '♦', '♣'];
 const RANKS = ['3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A', '2'];
 const EFFECT_RANKS = ['5', '6', '7', '10', 'J']; // 8は別扱い(cutFlag)
-const FOUL_PENALTY = 200;
 
 function buildDeck() {
   const d = [];
@@ -119,20 +118,24 @@ function evaluateSelection(gs, playerIndex, cardIds) {
   }
 
   const wouldFinish = count === player.hand.length;
+  let isFoulFinish = false;
   if (wouldFinish) {
     const ranksInvolved = type === 'straight' ? straightRanks : [rank];
-    const forbidden = isAllJoker || ranksInvolved.includes('2') ||
-      (type === 'set' && rank === '8') ||
-      (ranksInvolved.includes('3') && gs.revolutionCount % 2 === 1);
+    const containsEight = ranksInvolved.includes('8');
+    const containsJoker = cards.some(c => c.rank === 'JOKER');
+    const foulEligible = containsEight || containsJoker; // 8/JOKER: allowed only if forced, then treated as a foul-finish
+    const hardForbidden = ranksInvolved.includes('2') || (ranksInvolved.includes('3') && gs.revolutionCount % 2 === 1); // 2 / revolution-3: simply blocked, normal win if forced
+    const forbidden = foulEligible || hardForbidden;
     if (forbidden) {
       if (gs.field === null && gs._leadCheckDepth === 0 && !anyLegalLeadExists(gs, playerIndex)) {
-        // allow as last resort
+        // no other legal move exists to lead with — allow as a last resort so the game never soft-locks
+        isFoulFinish = foulEligible;
       } else {
         return { ok: false, reason: 'forbidden_finish' };
       }
     }
   }
-  return { ok: true, type, rank, count, cards, suitsUsed, straightRanks, isSpade3Counter };
+  return { ok: true, type, rank, count, cards, suitsUsed, straightRanks, isSpade3Counter, isFoulFinish };
 }
 function anyLegalLeadExists(gs, idx) {
   gs._leadCheckDepth = (gs._leadCheckDepth || 0) + 1;
@@ -215,7 +218,7 @@ function calculateRoundScore(gs) {
   gs.players[winnerIdx].score += points;
   gs.lastRoundPoints = points;
 }
-function commitFoulLoss(gs, actorIndex, reasonText) {
+function commitFoulLoss(gs, actorIndex, reasonText, foulCardCount) {
   gs.effectQueue = [];
   gs.pendingAfterQueue = null;
   const remaining = gs.players.filter((p, i) => i !== actorIndex && !p.finished);
@@ -226,10 +229,15 @@ function commitFoulLoss(gs, actorIndex, reasonText) {
   });
   gs.players[actorIndex].finished = true;
   gs.finishOrder.push(actorIndex);
-  calculateRoundScore(gs);
-  gs.players[actorIndex].score -= FOUL_PENALTY;
-  gs.foulPenalty = { name: gs.players[actorIndex].name, amount: FOUL_PENALTY, reason: reasonText };
-  gs.log = `⚠️ ${gs.players[actorIndex].name} が${reasonText}を実行できず反則負け!`;
+
+  const multiplier = Math.pow(2, gs.revolutionCount);
+  const points = foulCardCount * 100 * multiplier * 2;
+  const winnerIdx = gs.finishOrder[0];
+  gs.players[actorIndex].score -= points;
+  gs.players[winnerIdx].score += points;
+  gs.lastRoundPoints = points;
+  gs.foulPenalty = { name: gs.players[actorIndex].name, amount: points, reason: reasonText, cardCount: foulCardCount, rate: multiplier };
+  gs.log = `⚠️ ${gs.players[actorIndex].name} が${reasonText}で反則上がり!(-${points}pt)`;
   gs.phase = 'result';
 }
 
@@ -279,15 +287,14 @@ function applyPlay(gs, playerIndex, cardIds) {
 
   const finishedNow = player.hand.length === 0;
   const unfulfillableGiveDiscard = finishedNow && queue.length > 0;
-  const straightContainsEight = finishedNow && v.type === 'straight' && v.straightRanks.includes('8');
   if (unfulfillableGiveDiscard) {
     gs.log = logMsg;
-    commitFoulLoss(gs, playerIndex, queue.map(q => q.type === 'give' ? '7渡し' : '10捨て').join('・'));
+    commitFoulLoss(gs, playerIndex, queue.map(q => q.type === 'give' ? '7渡し' : '10捨て').join('・'), v.count);
     return true;
   }
-  if (straightContainsEight) {
+  if (finishedNow && v.isFoulFinish) {
     gs.log = logMsg;
-    commitFoulLoss(gs, playerIndex, '8を含む階段での上がり');
+    commitFoulLoss(gs, playerIndex, '8またはJOKERを含む上がり', v.count);
     return true;
   }
   if (finishedNow) {
@@ -295,6 +302,8 @@ function applyPlay(gs, playerIndex, cardIds) {
     logMsg += ` → ${player.name}が上がりました!`;
   }
   gs.log = logMsg;
+
+  gs.pendingFoulPlayCount = v.count;
 
   if (finishedNow) {
     if (checkGameEnd(gs)) return true;
@@ -323,7 +332,7 @@ function processNextQueueItem(gs, actorIndex) {
   const item = gs.effectQueue.shift();
   const player = gs.players[actorIndex];
   if (player.hand.length < item.n) {
-    commitFoulLoss(gs, actorIndex, item.type === 'give' ? '7渡し' : '10捨て');
+    commitFoulLoss(gs, actorIndex, item.type === 'give' ? '7渡し' : '10捨て', gs.pendingFoulPlayCount);
     return;
   }
   gs.pendingAction = item.type; gs.pendingCount = item.n; gs.pendingActor = actorIndex;
@@ -446,7 +455,7 @@ function createGameState(playersMeta) {
     finishOrder: [], selected: [], log: '',
     pendingAction: null, pendingCount: 0, pendingActor: null, effectQueue: [], pendingAfterQueue: null,
     lastRoundPoints: 0, trickHistory: [], foulPenalty: null,
-    _leadCheckDepth: 0,
+    _leadCheckDepth: 0, pendingFoulPlayCount: 0,
   };
   dealRound(gs);
   return gs;
